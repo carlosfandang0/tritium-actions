@@ -44,13 +44,13 @@
 #    (same secrets already used by NMEATouch20 and WiFi Bridge):
 #      VPS_SSH_KEY          — private SSH key for deploy user
 #      VPS_SSH_KNOWN_HOSTS  — output of: ssh-keyscan 54.37.19.85
-#      VPS_USER             — deploy username on the VPS
-#      VPS_HOST             — VPS hostname or IP (54.37.19.85)
+#    (VPS_USER and VPS_HOST are no longer secrets — they default to
+#     root@54.37.19.85 and can be overridden via inputs if needed)
 #
 # SECRETS
 # -------
 # The calling workflow must pass "secrets: inherit" so this workflow can
-# access VPS_SSH_KEY, VPS_SSH_KNOWN_HOSTS, VPS_USER, and VPS_HOST.
+# access VPS_SSH_KEY and VPS_SSH_KNOWN_HOSTS.
 #
 # MANIFEST FORMAT (produced on VPS)
 # ----------------------------------
@@ -145,6 +145,21 @@ on:
         type: string
         default: ""
 
+      vps_host:
+        description: >-
+          VPS hostname or IP address. Defaults to the Tritium VPS.
+          Override only if deploying to a different server.
+        required: false
+        type: string
+        default: "54.37.19.85"
+
+      vps_user:
+        description: >-
+          SSH username on the VPS. Defaults to root.
+        required: false
+        type: string
+        default: "root"
+
 jobs:
   deploy:
     name: Deploy ${{ inputs.project_slug }} v${{ inputs.version }} to VPS
@@ -184,8 +199,8 @@ jobs:
           import json, subprocess, sys, os
 
           files = json.loads('''${{ inputs.deploy_files_json }}''')
-          user  = "${{ secrets.VPS_USER }}"
-          host  = "${{ secrets.VPS_HOST }}"
+          user  = "${{ inputs.vps_user }}"
+          host  = "${{ inputs.vps_host }}"
           dest_dir = "/var/www/tritium-firmware"
 
           for f in files:
@@ -218,8 +233,8 @@ jobs:
           version = "${{ inputs.version }}"
           chip    = "${{ inputs.chip_family }}"
           parts   = json.loads('''${{ inputs.manifest_parts_json }}''')
-          user    = "${{ secrets.VPS_USER }}"
-          host    = "${{ secrets.VPS_HOST }}"
+          user    = "${{ inputs.vps_user }}"
+          host    = "${{ inputs.vps_host }}"
 
           from datetime import datetime, timezone
           date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -269,5 +284,5 @@ jobs:
       - name: Verify manifest on VPS
         run: |
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
-            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            ${{ inputs.vps_user }}@${{ inputs.vps_host }} \
             "echo '--- Manifest on VPS:' && cat /var/www/tritium-firmware/${{ inputs.project_slug }}-manifest.json"
