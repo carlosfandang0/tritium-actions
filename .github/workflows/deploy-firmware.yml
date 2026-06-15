@@ -1,0 +1,273 @@
+# =============================================================================
+# Tritium Reusable Firmware Deploy Workflow
+# =============================================================================
+#
+# PURPOSE
+# -------
+# This is the single source of truth for deploying firmware to the Tritium VPS.
+# Every firmware project (NMEATouch20, NMEA WiFi Bridge, and future projects)
+# calls this workflow instead of duplicating deploy logic.
+#
+# HOW IT WORKS
+# ------------
+# The calling workflow (in the firmware repo) is responsible for:
+#   1. Building the firmware (.bin files)
+#   2. Uploading the built files as a GitHub Actions artifact
+#   3. Calling this workflow with the inputs described below
+#
+# This workflow is then responsible for:
+#   1. Downloading the artifact from the calling workflow
+#   2. Connecting to the VPS over SSH
+#   3. Copying the firmware files to /var/www/tritium-firmware/
+#   4. Updating the JSON manifest on the VPS (version + date)
+#
+# ADDING A NEW PROJECT
+# --------------------
+# 1. In your firmware repo, create .github/workflows/build-firmware.yml
+#    (copy NMEATouch20's as a template — it's well commented)
+# 2. Set the following inputs when calling this workflow:
+#      project_slug:       short identifier, e.g. "my-new-device"
+#                          Files will be named {slug}-manifest.json, etc.
+#      chip_family:        ESP chip family string for the manifest,
+#                          e.g. "ESP32-S3" or "ESP32"
+#      version:            version string, e.g. "1.2"
+#      deploy_files_json:  JSON array of objects:
+#                            [{"src": "relative/path/in/artifact", "dest": "filename-on-vps.bin"}]
+#                          'src' is relative to the root of the downloaded artifact.
+#                          'dest' is the filename (not path) placed in /var/www/tritium-firmware/
+#      manifest_parts_json: JSON array of objects for the ESP Web Tools manifest:
+#                            [{"path": "/firmware/filename-on-vps.bin", "offset": 0}]
+#                          'path' is the URL path as the browser will request it.
+#                          'offset' is the flash memory address in decimal.
+#
+# 3. Add the following repository secrets to YOUR firmware repo
+#    (same secrets already used by NMEATouch20 and WiFi Bridge):
+#      VPS_SSH_KEY          — private SSH key for deploy user
+#      VPS_SSH_KNOWN_HOSTS  — output of: ssh-keyscan 54.37.19.85
+#      VPS_USER             — deploy username on the VPS
+#      VPS_HOST             — VPS hostname or IP (54.37.19.85)
+#
+# SECRETS
+# -------
+# The calling workflow must pass "secrets: inherit" so this workflow can
+# access VPS_SSH_KEY, VPS_SSH_KNOWN_HOSTS, VPS_USER, and VPS_HOST.
+#
+# MANIFEST FORMAT (produced on VPS)
+# ----------------------------------
+# /var/www/tritium-firmware/{project_slug}-manifest.json:
+# {
+#   "name": "...",       <- set from project_slug (humanised)
+#   "version": "1.2",   <- set from 'version' input
+#   "date": "2026-06-15",
+#   "funding_url": "https://tritium.co.uk/contribute",
+#   "new_install_prompt_erase": true,
+#   "builds": [
+#     {
+#       "chipFamily": "ESP32-S3",
+#       "parts": [
+#         {"path": "/firmware/...", "offset": 0},
+#         ...
+#       ]
+#     }
+#   ]
+# }
+#
+# The website reads this manifest at runtime via Apache (which serves
+# /firmware/ directly from /var/www/tritium-firmware/ — not through Next.js).
+# =============================================================================
+
+name: Deploy firmware to VPS (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      project_slug:
+        description: >
+          Short identifier for the project, e.g. "nmeatouch20" or "nmea-wifi-bridge".
+          Used to name files on the VPS: {slug}-manifest.json, {slug}-firmware.bin, etc.
+        required: true
+        type: string
+
+      chip_family:
+        description: >
+          ESP chip family string written into the manifest, e.g. "ESP32-S3" or "ESP32".
+          Must match the chip you are flashing — ESP Web Tools validates this.
+        required: true
+        type: string
+
+      version:
+        description: >
+          Firmware version string, e.g. "1.4". Extracted by the calling workflow
+          from the source code (APP_VERSION in main.cpp) and passed here.
+        required: true
+        type: string
+
+      deploy_files_json:
+        description: >
+          JSON array listing which files to copy to the VPS.
+          Each entry: {"src": "path/in/artifact", "dest": "filename-on-vps.bin"}
+          Example (NMEATouch20):
+            [
+              {"src": ".pio/build/Guition_ESP32_4848S040/bootloader.bin", "dest": "nmeatouch20-bootloader.bin"},
+              {"src": ".pio/build/Guition_ESP32_4848S040/partitions.bin", "dest": "nmeatouch20-partitions.bin"},
+              {"src": ".pio/build/Guition_ESP32_4848S040/firmware.bin",   "dest": "nmeatouch20-firmware.bin"},
+              {"src": ".pio/build/Guition_ESP32_4848S040/littlefs.bin",   "dest": "nmeatouch20-littlefs.bin"}
+            ]
+          Example (single merged binary):
+            [{"src": "firmware-merged.bin", "dest": "nmea-wifi-bridge.bin"}]
+        required: true
+        type: string
+
+      manifest_parts_json:
+        description: >
+          JSON array of flash parts written into the ESP Web Tools manifest.
+          Each entry: {"path": "/firmware/filename.bin", "offset": <decimal address>}
+          'path' is the URL the browser fetches during flashing.
+          'offset' is the flash memory address (decimal, not hex).
+          Example (NMEATouch20):
+            [
+              {"path": "/firmware/nmeatouch20-bootloader.bin", "offset": 0},
+              {"path": "/firmware/nmeatouch20-partitions.bin", "offset": 32768},
+              {"path": "/firmware/nmeatouch20-firmware.bin",   "offset": 65536},
+              {"path": "/firmware/nmeatouch20-littlefs.bin",   "offset": 4653056}
+            ]
+          Example (single merged binary at 0x0):
+            [{"path": "/firmware/nmea-wifi-bridge.bin", "offset": 0}]
+        required: true
+        type: string
+
+      artifact_name:
+        description: >
+          Name of the GitHub Actions artifact uploaded by the calling workflow's
+          build job. Defaults to "firmware-{project_slug}".
+          Override only if your build job uses a different artifact name.
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.project_slug }} v${{ inputs.version }} to VPS
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # ------------------------------------------------------------------
+      # 1. Download the firmware artifact built by the calling workflow
+      # ------------------------------------------------------------------
+      - name: Download firmware artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name != '' && inputs.artifact_name || format('firmware-{0}', inputs.project_slug) }}
+          path: firmware-artifact
+
+      - name: List downloaded files (for debugging)
+        run: find firmware-artifact -type f | sort
+
+      # ------------------------------------------------------------------
+      # 2. Set up SSH access to the VPS
+      # ------------------------------------------------------------------
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "${{ secrets.VPS_SSH_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+
+      # ------------------------------------------------------------------
+      # 3. Copy firmware files to the VPS
+      #    Reads deploy_files_json input and SCPs each file.
+      # ------------------------------------------------------------------
+      - name: Deploy firmware files to VPS
+        run: |
+          python3 - << 'PYEOF'
+          import json, subprocess, sys, os
+
+          files = json.loads('''${{ inputs.deploy_files_json }}''')
+          user  = "${{ secrets.VPS_USER }}"
+          host  = "${{ secrets.VPS_HOST }}"
+          dest_dir = "/var/www/tritium-firmware"
+
+          for f in files:
+              src  = os.path.join("firmware-artifact", f["src"])
+              dest = f"{user}@{host}:{dest_dir}/{f['dest']}"
+              print(f"Deploying: {src} -> {dest_dir}/{f['dest']}")
+              result = subprocess.run([
+                  "scp", "-i", os.path.expanduser("~/.ssh/deploy_key"),
+                  "-o", "StrictHostKeyChecking=yes",
+                  src, dest
+              ])
+              if result.returncode != 0:
+                  print(f"ERROR: Failed to deploy {src}", file=sys.stderr)
+                  sys.exit(1)
+
+          print(f"All {len(files)} file(s) deployed successfully.")
+          PYEOF
+
+      # ------------------------------------------------------------------
+      # 4. Write/update the JSON manifest on the VPS
+      #    Creates the manifest if it doesn't exist, or updates version/date
+      #    and rebuilds the parts list in place.
+      # ------------------------------------------------------------------
+      - name: Update manifest on VPS
+        run: |
+          python3 - << 'PYEOF'
+          import json, subprocess, os, sys, textwrap
+
+          slug    = "${{ inputs.project_slug }}"
+          version = "${{ inputs.version }}"
+          chip    = "${{ inputs.chip_family }}"
+          parts   = json.loads('''${{ inputs.manifest_parts_json }}''')
+          user    = "${{ secrets.VPS_USER }}"
+          host    = "${{ secrets.VPS_HOST }}"
+
+          from datetime import datetime, timezone
+          date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+          # Build human-readable name from slug (e.g. "nmeatouch20" -> "NMEATouch20")
+          # Just title-case it; can be overridden in future if needed
+          name = slug.replace("-", " ").title()
+
+          manifest = {
+              "name": name,
+              "version": version,
+              "date": date,
+              "funding_url": "https://tritium.co.uk/contribute",
+              "new_install_prompt_erase": True,
+              "builds": [
+                  {
+                      "chipFamily": chip,
+                      "parts": [{"path": p["path"], "offset": p["offset"]} for p in parts]
+                  }
+              ]
+          }
+
+          manifest_json = json.dumps(manifest, indent=2)
+          manifest_path = f"/var/www/tritium-firmware/{slug}-manifest.json"
+
+          # Write manifest via SSH stdin to avoid shell quoting issues
+          script = f"cat > {manifest_path}"
+          result = subprocess.run(
+              ["ssh", "-i", os.path.expanduser("~/.ssh/deploy_key"),
+               "-o", "StrictHostKeyChecking=yes",
+               f"{user}@{host}", script],
+              input=manifest_json.encode()
+          )
+          if result.returncode != 0:
+              print("ERROR: Failed to write manifest", file=sys.stderr)
+              sys.exit(1)
+
+          print(f"Manifest written: {manifest_path}")
+          print(f"  version: {version}")
+          print(f"  date:    {date}")
+          print(f"  parts:   {len(parts)}")
+          PYEOF
+
+      # ------------------------------------------------------------------
+      # 5. Verify — read back the manifest from the VPS and print it
+      # ------------------------------------------------------------------
+      - name: Verify manifest on VPS
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            "echo '--- Manifest on VPS:' && cat /var/www/tritium-firmware/${{ inputs.project_slug }}-manifest.json"
