@@ -40,17 +40,16 @@
 #                          'path' is the URL path as the browser will request it.
 #                          'offset' is the flash memory address in decimal.
 #
-# 3. Add the following repository secrets to YOUR firmware repo
-#    (same secrets already used by NMEATouch20 and WiFi Bridge):
+# 3. Add the following repository secret to YOUR firmware repo:
 #      VPS_SSH_KEY          — private SSH key for deploy user
-#      VPS_SSH_KNOWN_HOSTS  — output of: ssh-keyscan 54.37.19.85
-#    (VPS_USER and VPS_HOST are no longer secrets — they default to
-#     root@54.37.19.85 and can be overridden via inputs if needed)
+#    (VPS_USER, VPS_HOST, and VPS_SSH_KNOWN_HOSTS are no longer needed —
+#     user/host default to root@54.37.19.85, and the host key is fetched
+#     live via ssh-keyscan at deploy time)
 #
 # SECRETS
 # -------
 # The calling workflow must pass "secrets: inherit" so this workflow can
-# access VPS_SSH_KEY and VPS_SSH_KNOWN_HOSTS.
+# access VPS_SSH_KEY.
 #
 # MANIFEST FORMAT (produced on VPS)
 # ----------------------------------
@@ -187,7 +186,7 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          printf '%s\n' "${{ secrets.VPS_SSH_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -H "${{ inputs.vps_host }}" >> ~/.ssh/known_hosts
 
       # ------------------------------------------------------------------
       # 3. Copy firmware files to the VPS
