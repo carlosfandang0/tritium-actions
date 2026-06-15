@@ -145,16 +145,6 @@ on:
         type: string
         default: ""
 
-    secrets:
-      VPS_SSH_KEY:
-        required: true
-      VPS_SSH_KNOWN_HOSTS:
-        required: true
-      VPS_USER:
-        required: true
-      VPS_HOST:
-        required: true
-
 jobs:
   deploy:
     name: Deploy ${{ inputs.project_slug }} v${{ inputs.version }} to VPS
